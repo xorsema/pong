@@ -1,6 +1,9 @@
 #include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <math.h>
+
+#define dist_form( x, y ) ( sqrt( pow( x, 2 ) + pow( y, 2 ) ) )
 
 bool init();
 void quit();
@@ -23,6 +26,7 @@ struct ball
 	float x, y;
 	float xv, yv;
 	SDL_Rect rect;
+	bool colliding;
 };
 
 const char *WINDOW_TITLE = "Pong";
@@ -30,9 +34,10 @@ const int WIN_WIDTH = 640;
 const int WIN_HEIGHT = 480;
 const int PADDLE_HEIGHT = 125;
 const int PADDLE_WIDTH = 25;
-const int PADDLE_SPEED = 100;
+const int PADDLE_SPEED = 200;
 const int BALL_SIZE = 20;
-const int BALL_SPEED = 100;
+const int BALL_SPEED = 400;
+const int PADDLE_STRENGTH = 300;
 
 SDL_Window *window;
 SDL_Renderer *renderer;
@@ -175,7 +180,7 @@ void reset_ball()
 
 void handle_ball()
 {
-	if( ball.x + BALL_SIZE < 0 )
+	if( ball.x + BALL_SIZE < 0 && ball.colliding )
 	{
 		player2.score ++;
 		reset_ball();
@@ -188,10 +193,6 @@ void handle_ball()
 		return;
 	}
 
-	if( ball.y + BALL_SIZE > WIN_HEIGHT || ball.y < 0 )
-	{
-		ball.yv *= -1;
-	}
 
 	struct player *p = NULL;
 
@@ -200,13 +201,29 @@ void handle_ball()
 	if( SDL_HasIntersection( &ball.rect, &player2.rect ) )
 		p = &player2;
 
+
+	if( ( ball.y + BALL_SIZE > WIN_HEIGHT || ball.y < 0 ) && ball.colliding == false )
+	{
+		ball.yv *= -1;
+		ball.colliding = true;
+	}
 	
-	if( p != NULL )
+	if( p != NULL && ball.colliding == false )
 	{
 		ball.xv = ( ( ( ball.x + BALL_SIZE / 2.0 ) - (p->rect.x + PADDLE_WIDTH / 2.0 ) ) * 8 );
 		ball.yv = ( ( ( ball.y + BALL_SIZE / 2.0 ) - (p->rect.y + PADDLE_HEIGHT / 2.0 ) ) * 8 );
+		float dist = dist_form( ball.xv, ball.yv );
+		ball.xv /= dist;
+		ball.yv /= dist;
+		ball.xv *= BALL_SPEED;
+		ball.yv *= BALL_SPEED;
+		ball.colliding = true;
 	}
 
+	if ( !( ball.y + BALL_SIZE > WIN_HEIGHT || ball.y < 0 ) && p == NULL )
+	{
+		ball.colliding = false;
+	}
 }
 
 int main( int argc, char **argv )
@@ -231,6 +248,7 @@ int main( int argc, char **argv )
 
 	player2.rect.x = WIN_WIDTH - player2.rect.w;
 
+	ball.colliding = false;
 	ball.xv = -BALL_SPEED;
 
 	loop();
