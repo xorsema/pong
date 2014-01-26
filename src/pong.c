@@ -15,8 +15,8 @@ void handle_ball();
 
 struct player
 {
-	SDL_Rect rect;
-	float ypos;
+	SDL_Rect rect[2];
+	float offset;
 	bool status[2];
 	int score;
 };
@@ -87,6 +87,15 @@ void input( SDL_Event event )
 		{
 			player1.status[0] = true;
 		}
+		if( event.key.keysym.sym == SDLK_a )
+		{
+			player2.status[1] = true;
+		}
+		if( event.key.keysym.sym == SDLK_d )
+		{
+			player2.status[0] = true;
+		}
+
 		break;
 
 	case SDL_KEYUP:
@@ -98,6 +107,16 @@ void input( SDL_Event event )
 		{
 			player1.status[0] = false;
 		}
+
+		if( event.key.keysym.sym == SDLK_a )
+		{
+			player2.status[1] = false;
+		}
+		if( event.key.keysym.sym == SDLK_d )
+		{
+			player2.status[0] = false;
+		}
+
 		if( event.key.keysym.sym == SDLK_r )
 		{
 			reset_ball();
@@ -123,16 +142,29 @@ void loop()
 
 		if( player1.status[0] )
 		{
-			player1.ypos -= PADDLE_SPEED * ( delta / 1000.f );
+			player1.offset -= PADDLE_SPEED * ( delta / 1000.f );
 		}
 
 		if( player1.status[1] )
 		{
-			player1.ypos += PADDLE_SPEED * ( delta / 1000.f );
+			player1.offset += PADDLE_SPEED * ( delta / 1000.f );
 		}
 
-		player1.rect.y = player1.ypos;
-		player2.rect.y = player2.ypos;
+		if( player2.status[1] )
+		{
+			player2.offset -= PADDLE_SPEED * ( delta / 1000.f );
+		}
+
+		if( player2.status[0] )
+		{
+			player2.offset += PADDLE_SPEED * ( delta / 1000.f );
+		}
+
+
+		player1.rect[0].y = player1.offset;
+		player2.rect[0].x = player2.offset;
+		player1.rect[1].y = player1.offset;
+		player2.rect[1].x = player2.offset;
 
 		ball.x += ball.xv * ( delta / 1000.f );
 		ball.y += ball.yv * ( delta / 1000.f );
@@ -142,16 +174,13 @@ void loop()
 
 		handle_ball();
 
-		if( ( player2.ypos + PADDLE_HEIGHT / 2.0 ) > ball.y + BALL_SIZE / 2.0 )
-			player2.ypos -= PADDLE_SPEED * ( delta / 1000.f );
-
-		if( ( player2.ypos + PADDLE_HEIGHT / 2.0 ) < ball.y + BALL_SIZE / 2.0 )
-			player2.ypos += PADDLE_SPEED * ( delta / 1000.f );
-
 		SDL_RenderClear( renderer );
 
-		white_rect( &player1.rect );
-		white_rect( &player2.rect );
+		white_rect( &player1.rect[0] );
+		white_rect( &player2.rect[0] );
+		white_rect( &player1.rect[1] );
+		white_rect( &player2.rect[1] );
+
 		white_rect( &ball.rect );
 
 		SDL_RenderPresent( renderer );
@@ -180,7 +209,7 @@ void reset_ball()
 
 void handle_ball()
 {
-	if( ball.x + BALL_SIZE < 0 && ball.colliding )
+	if( ball.x + BALL_SIZE < 0 )
 	{
 		player2.score ++;
 		reset_ball();
@@ -188,30 +217,39 @@ void handle_ball()
 	}
 	if( ball.x > WIN_WIDTH )
 	{
+		player2.score ++;
+		reset_ball();
+		return;
+	}
+
+	if( ball.y + BALL_SIZE < 0 )
+	{
+		player1.score ++;
+		reset_ball();
+		return;
+	}
+	if( ball.y > WIN_HEIGHT )
+	{
 		player1.score ++;
 		reset_ball();
 		return;
 	}
 
+        SDL_Rect *p = NULL;
 
-	struct player *p = NULL;
+	if( SDL_HasIntersection( &ball.rect, &player1.rect[0] ) )
+		p = &player1.rect[0];
+	if( SDL_HasIntersection( &ball.rect, &player2.rect[0] ) )
+		p = &player2.rect[0];
+	if( SDL_HasIntersection( &ball.rect, &player1.rect[1] ) )
+		p = &player1.rect[1];
+	if( SDL_HasIntersection( &ball.rect, &player2.rect[1] ) )
+		p = &player2.rect[1];
 
-	if( SDL_HasIntersection( &ball.rect, &player1.rect ) )
-		p = &player1;
-	if( SDL_HasIntersection( &ball.rect, &player2.rect ) )
-		p = &player2;
-
-
-	if( ( ball.y + BALL_SIZE > WIN_HEIGHT || ball.y < 0 ) && ball.colliding == false )
-	{
-		ball.yv *= -1;
-		ball.colliding = true;
-	}
-	
 	if( p != NULL && ball.colliding == false )
 	{
-		ball.xv = ( ( ( ball.x + BALL_SIZE / 2.0 ) - (p->rect.x + PADDLE_WIDTH / 2.0 ) ) * 8 );
-		ball.yv = ( ( ( ball.y + BALL_SIZE / 2.0 ) - (p->rect.y + PADDLE_HEIGHT / 2.0 ) ) * 8 );
+		ball.xv = ( ( ( ball.x + BALL_SIZE / 2.0 ) - (p->x + p->w / 2.0 ) )  );
+		ball.yv = ( ( ball.y + BALL_SIZE / 2.0 ) - (p->y + p->h / 2.0 ) );
 		float dist = dist_form( ball.xv, ball.yv );
 		ball.xv /= dist;
 		ball.yv /= dist;
@@ -220,7 +258,7 @@ void handle_ball()
 		ball.colliding = true;
 	}
 
-	if ( !( ball.y + BALL_SIZE > WIN_HEIGHT || ball.y < 0 ) && p == NULL )
+	if ( p == NULL )
 	{
 		ball.colliding = false;
 	}
@@ -235,18 +273,25 @@ int main( int argc, char **argv )
 		return 1;
 	}
 
-	player1.rect.w = PADDLE_WIDTH;
-	player1.rect.h = PADDLE_HEIGHT;
+	player1.rect[0].w = PADDLE_WIDTH;
+	player1.rect[0].h = PADDLE_HEIGHT;
 
-	player2.rect.w = PADDLE_WIDTH;
-	player2.rect.h = PADDLE_HEIGHT;
+	player1.rect[1].w = PADDLE_WIDTH;
+	player1.rect[1].h = PADDLE_HEIGHT;
+
+	player2.rect[0].w = PADDLE_HEIGHT;
+	player2.rect[0].h = PADDLE_WIDTH;
+
+	player2.rect[1].w = PADDLE_HEIGHT;
+	player2.rect[1].h = PADDLE_WIDTH;
 
 	ball.rect.w = BALL_SIZE;
 	ball.rect.h = BALL_SIZE;
 
 	reset_ball();
 
-	player2.rect.x = WIN_WIDTH - player2.rect.w;
+	player1.rect[1].x = WIN_WIDTH - player1.rect[1].w;
+	player2.rect[1].y = WIN_HEIGHT - player2.rect[1].h;
 
 	ball.colliding = false;
 	ball.xv = -BALL_SPEED;
