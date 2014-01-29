@@ -1,6 +1,7 @@
 #include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <math.h>
 #include <stdlib.h>
 
@@ -10,6 +11,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+
+#define MAXPACKETSIZE 512
+#define PORTNUM "1200"
 
 #define dist_form( x, y ) ( sqrt( pow( x, 2 ) + pow( y, 2 ) ) )
 
@@ -50,6 +54,10 @@ void white_rect( SDL_Rect * );
 void reset_ball();
 void handle_ball();
 bool net_bind( struct net * );
+bool net_recv( struct net *, void *, int, int * );
+bool net_send( struct net *, void *, int );
+void net_simple_packet( struct net *, uint8_t );
+int net_thread( void * );
 
 const char *WINDOW_TITLE = "Pong";
 const int WIN_WIDTH = 640;
@@ -74,6 +82,14 @@ enum
 	PACKET_ACK = 2,
 	PACKET_SYNACK = 3,
 	PACKET_UPDATE = 4
+};
+
+enum
+{
+	NET_STATE_WAIT_SYN,
+	NET_STATE_WAIT_ACK,
+	NET_STATE_WAIT_SYNACK,
+	NET_STATE_GAME
 };
 
 SDL_Window *window;
@@ -358,6 +374,8 @@ bool net_bind( struct net *pnet )
 		break;
 	}
 
+	freeaddrinfo( servinfo );
+
 	if( p == NULL )
 	{
 		return false;
@@ -370,15 +388,161 @@ bool net_bind( struct net *pnet )
 	return true;
 }
 
+bool net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen )
+{
+	uint8_t buf[MAXPACKETSIZE];
+	struct sockaddr_storage from;
+	int fromlen;
+	int numbytes;
+
+	numbytes = recvfrom( pnet->socket, buf, MAXPACKETSIZE, 0, (struct sockaddr* )&from, &fromlen );
+	if( numbytes == -1 || numbytes > buflen )
+	{
+		return false;
+	}
+	
+	memcpy( outbuf, buf, numbytes );
+	*outlen = numbytes;
+	return true;
+}
+
+bool net_send( struct net *pnet, void *inbuf, int inlen )
+{
+	int numbytes;
+
+	numbytes = sendto( pnet->socket, inbuf, inlen, 0, pnet->addr, pnet->addrlen );
+	if( numbytes < inlen )
+	{
+		return false;
+	}
+
+	return true;
+}
+
+/* Send a packet without game state data (syn, ack, etc) */
+void net_simple_packet( struct net *pnet, uint8_t type )
+{
+	net_send( pnet, &type, 1 );
+}
+
+int net_thread( void *ptr )
+{
+	uint8_t buf[MAXPACKETSIZE];
+	int buflen = MAXPACKETSIZE;
+	int recvbytes;
+	struct net *pnet = (struct net*)ptr;
+
+	while( running )
+	{
+		if( !net_recv( pnet, buf, buflen, &recvbytes ) )
+		{
+			continue;
+		}
+
+		switch( pnet->state )
+		{
+		case NET_STATE_WAIT_SYN:
+			if( *(uint8_t*)&buf[0] == PACKET_SYN )
+			{
+				net_simple_packet( pnet, PACKET_ACK );
+				pnet->state = NET_STATE_WAIT_SYNACK;
+			}
+			break;
+		case NET_STATE_WAIT_ACK:
+			if( *(uint8_t*)&buf[0] == PACKET_ACK )
+			{
+				net_simple_packet( pnet, PACKET_SYNACK );
+				pnet->state = NET_STATE_GAME;
+			}
+			break;
+		case NET_STATE_WAIT_SYNACK:
+			if( *(uint8_t*)&buf[0] == PACKET_SYNACK )
+			{
+				pnet->state = NET_STATE_GAME;
+			}
+			break;
+		case NET_STATE_GAME:
+			if( *(uint8_t*)&buf[0] == PACKET_UPDATE )
+			{
+				//...
+			}
+			break;
+		}
+
+		memset( buf, 0, MAXPACKETSIZE );
+	}
+}
+
+void net_create_thread( struct net *pnet )
+{
+	SDL_CreateThread( net_thread, "net", pnet );
+}
+
 int main( int argc, char **argv )
 {
+	struct net net;
+
+	if( argc > 1 )
+	{
+		strcpy( net.port, PORTNUM );
+		if( strcmp( "join", argv[1] ) == 0 )
+		{
+			if( argc < 2 )
+			{
+				printf( "Please specify a host to connect to!\n" );
+				return 1;
+			}
+			net.node = argv[2];
+			net.type = NET_JOIN;
+		}
+		else if( strcmp( "host", argv[1] ) == 0 )
+		{
+			net.node = NULL;
+			net.type = NET_HOST;
+			net.state = NET_STATE_WAIT_SYN;
+		}
+		else
+		{
+			printf( "Unknown argument!\n" );
+			return 1;
+		}
+
+		if( !net_bind( &net ) )
+		{
+			printf( "Could not bind to port, exiting!\n" );
+			return 1;
+		}
+
+		printf( "Bound to port %s", net.port );
+		if( net.type == NET_JOIN )
+		{
+			net_simple_packet( &net, PACKET_SYN );
+			net.state = NET_STATE_WAIT_ACK;
+		}
+		else
+		{
+			net.state = NET_STATE_WAIT_SYN;
+		}
+
+		net_create_thread( &net );
+
+		while( net.state != NET_STATE_GAME )
+		{
+			SDL_Delay( 10 );
+		}
+	}
+	else
+	{
+		net.type = NET_LOCAL;
+	}
+
 	if( !init() )
 	{
 		printf( "an error occurred\n" );
 		quit();
 		return 1;
 	}
-
+	
 	ball.xv = -BALL_SPEED;
 
 	loop();
