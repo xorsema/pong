@@ -1,7 +1,7 @@
 CC = gcc
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LDFLAGS = $(shell sdl2-config --libs)
-CFLAGS = -std=c99 -g $(SDL_CFLAGS)
+CFLAGS = -std=c99 -D_POSIX_SOURCE -g $(SDL_CFLAGS)
 LINK = -lm  $(SDL_LDFLAGS)
 VPATH = src/
 OUT = bin/

@@ -2,16 +2,16 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <math.h>
+#include <stdlib.h>
+
+#include <sys/unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 
 #define dist_form( x, y ) ( sqrt( pow( x, 2 ) + pow( y, 2 ) ) )
-
-bool init();
-void quit();
-void input( SDL_Event );
-void loop();
-void white_rect( SDL_Rect * );
-void reset_ball();
-void handle_ball();
 
 struct player
 {
@@ -19,6 +19,7 @@ struct player
 	float offset;
 	bool status[2];
 	int score;
+	SDL_mutex *mutex;
 };
 
 struct ball
@@ -27,7 +28,28 @@ struct ball
 	float xv, yv;
 	SDL_Rect rect;
 	bool colliding;
+	SDL_mutex *mutex;
 };
+
+struct net
+{
+	char port[6];
+	char *node;
+	int socket;
+	struct sockaddr *addr;
+	socklen_t addrlen;
+	int state;
+	int type;
+};
+
+bool init();
+void quit();
+void input( SDL_Event );
+void loop();
+void white_rect( SDL_Rect * );
+void reset_ball();
+void handle_ball();
+bool net_bind( struct net * );
 
 const char *WINDOW_TITLE = "Pong";
 const int WIN_WIDTH = 640;
@@ -38,6 +60,21 @@ const int PADDLE_SPEED = 200;
 const int BALL_SIZE = 20;
 const int BALL_SPEED = 400;
 const int PADDLE_STRENGTH = 300;
+
+enum 
+{
+	NET_LOCAL = 1,
+	NET_HOST = 2,
+	NET_JOIN = 3
+};
+
+enum
+{
+	PACKET_SYN = 1,
+	PACKET_ACK = 2,
+	PACKET_SYNACK = 3,
+	PACKET_UPDATE = 4
+};
 
 SDL_Window *window;
 SDL_Renderer *renderer;
@@ -51,6 +88,32 @@ bool init()
 {
 	window = SDL_CreateWindow( WINDOW_TITLE, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_WIDTH, WIN_HEIGHT, 0 );
 	renderer = SDL_CreateRenderer( window, -1, SDL_RENDERER_ACCELERATED );
+
+	player1.rect[0].w = PADDLE_WIDTH;
+	player1.rect[0].h = PADDLE_HEIGHT;
+
+	player1.rect[1].w = PADDLE_WIDTH;
+	player1.rect[1].h = PADDLE_HEIGHT;
+
+	player2.rect[0].w = PADDLE_HEIGHT;
+	player2.rect[0].h = PADDLE_WIDTH;
+
+	player2.rect[1].w = PADDLE_HEIGHT;
+	player2.rect[1].h = PADDLE_WIDTH;
+
+	ball.rect.w = BALL_SIZE;
+	ball.rect.h = BALL_SIZE;
+
+	reset_ball();
+
+	player1.rect[1].x = WIN_WIDTH - player1.rect[1].w;
+	player2.rect[1].y = WIN_HEIGHT - player2.rect[1].h;
+
+	ball.colliding = false;
+
+	player1.mutex = SDL_CreateMutex();
+	player2.mutex = SDL_CreateMutex();
+	ball.mutex = SDL_CreateMutex();
 
 	return ( ( window != NULL ) && ( renderer != NULL ) );
 }
@@ -264,6 +327,49 @@ void handle_ball()
 	}
 }
 
+bool net_bind( struct net *pnet )
+{
+	struct addrinfo hints;
+	struct addrinfo *servinfo, *p;
+	int result;
+
+	memset( &hints, 0, sizeof( struct addrinfo ) );
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = AI_PASSIVE;
+
+	if( getaddrinfo( pnet->node, pnet->port, &hints, &servinfo ) != 0 )
+	{
+		return false;
+	}
+
+	for( p = servinfo; p != NULL; p = p->ai_next )
+	{
+		if( ( result = socket( p->ai_family, p->ai_socktype, p->ai_protocol ) ) == -1 )
+		{
+			continue;
+		}
+
+		if( bind( result, p->ai_addr, p->ai_addrlen ) == -1 )
+		{
+			continue;
+		}
+
+		break;
+	}
+
+	if( p == NULL )
+	{
+		return false;
+	}
+	
+	pnet->addr = p->ai_addr;
+	pnet->addrlen = p->ai_addrlen;
+	pnet->socket = result;
+
+	return true;
+}
+
 int main( int argc, char **argv )
 {
 	if( !init() )
@@ -273,27 +379,6 @@ int main( int argc, char **argv )
 		return 1;
 	}
 
-	player1.rect[0].w = PADDLE_WIDTH;
-	player1.rect[0].h = PADDLE_HEIGHT;
-
-	player1.rect[1].w = PADDLE_WIDTH;
-	player1.rect[1].h = PADDLE_HEIGHT;
-
-	player2.rect[0].w = PADDLE_HEIGHT;
-	player2.rect[0].h = PADDLE_WIDTH;
-
-	player2.rect[1].w = PADDLE_HEIGHT;
-	player2.rect[1].h = PADDLE_WIDTH;
-
-	ball.rect.w = BALL_SIZE;
-	ball.rect.h = BALL_SIZE;
-
-	reset_ball();
-
-	player1.rect[1].x = WIN_WIDTH - player1.rect[1].w;
-	player2.rect[1].y = WIN_HEIGHT - player2.rect[1].h;
-
-	ball.colliding = false;
 	ball.xv = -BALL_SPEED;
 
 	loop();
