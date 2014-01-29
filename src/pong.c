@@ -516,8 +516,9 @@ int main( int argc, char **argv )
 			return 1;
 		}
 
-		printf( "Bound to port %s", net.port );
+		printf( "Bound to port %s\n", net.port );
 		fflush( stdout );
+
 		if( net.type == NET_JOIN )
 		{
 			net_simple_packet( &net, PACKET_SYN );
