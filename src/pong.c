@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 #include <sys/unistd.h>
 #include <sys/types.h>
@@ -57,7 +58,7 @@ bool net_bind( struct net * );
 bool net_recv( struct net *, void *, int, int * );
 bool net_send( struct net *, void *, int );
 void net_simple_packet( struct net *, uint8_t );
-int net_thread( void * );
+void *net_thread( void * );
 
 const char *WINDOW_TITLE = "Pong";
 const int WIN_WIDTH = 640;
@@ -425,7 +426,7 @@ void net_simple_packet( struct net *pnet, uint8_t type )
 	net_send( pnet, &type, 1 );
 }
 
-int net_thread( void *ptr )
+void *net_thread( void *ptr )
 {
 	uint8_t buf[MAXPACKETSIZE];
 	int buflen = MAXPACKETSIZE;
@@ -475,7 +476,9 @@ int net_thread( void *ptr )
 
 void net_create_thread( struct net *pnet )
 {
-	SDL_CreateThread( net_thread, "net", pnet );
+	pthread_t t;
+
+	pthread_create( &t, NULL, net_thread, pnet );
 }
 
 int main( int argc, char **argv )
@@ -514,6 +517,7 @@ int main( int argc, char **argv )
 		}
 
 		printf( "Bound to port %s", net.port );
+		fflush( stdout );
 		if( net.type == NET_JOIN )
 		{
 			net_simple_packet( &net, PACKET_SYN );
