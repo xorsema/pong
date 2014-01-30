@@ -212,7 +212,6 @@ void loop()
 {
 	SDL_Event event;
 	Uint32 ticks = SDL_GetTicks();
-	running = true;
 
 	while( running )
 	{
@@ -464,6 +463,7 @@ void *net_thread( void *ptr )
 		case NET_STATE_WAIT_SYN:
 			if( *(uint8_t*)&buf[0] == PACKET_SYN )
 			{
+				printf( "SYN received\n" );
 				net_simple_packet( pnet, PACKET_ACK, (struct sockaddr*)&from, fromlen );
 				pnet->state = NET_STATE_WAIT_SYNACK;
 			}
@@ -503,6 +503,7 @@ void net_create_thread( struct net *pnet )
 int main( int argc, char **argv )
 {
 	struct net net;
+	running = true;
 
 	if( argc > 1 )
 	{
