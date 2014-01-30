@@ -58,7 +58,7 @@ void handle_ball();
 bool net_bind( struct net * );
 bool net_recv( struct net *, void *, int, int *, struct sockaddr*, int* );
 bool net_send( struct net *, void *, int, struct sockaddr *, int );
-void net_simple_packet( struct net *, uint8_t, struct sockaddr *, int );
+bool net_simple_packet( struct net *, uint8_t, struct sockaddr *, int );
 void *net_thread( void * );
 
 const char *WINDOW_TITLE = "Pong";
@@ -389,22 +389,6 @@ bool net_bind( struct net *pnet )
 
 	pnet->socket = result;
 
-	if( pnet->type == NET_JOIN )
-	{
-		memset( &hints, 0, sizeof( struct addrinfo ) );
-		hints.ai_family = AF_UNSPEC;
-		hints.ai_socktype = SOCK_DGRAM;
-		
-		if( getaddrinfo( pnet->node, pnet->port, &hints, &servinfo ) != 0 )
-		{
-			printf( "getaddrinfo error\n" );
-			return false;
-		}
-		
-		pnet->addr = servinfo->ai_addr;
-		pnet->addrlen = servinfo->ai_addrlen;
-	}
-
 	return true;
 }
 
@@ -427,6 +411,10 @@ bool net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen, struct s
 bool net_send( struct net *pnet, void *inbuf, int inlen, struct sockaddr *to, int tolen )
 {
 	int numbytes;
+	char ip4[INET_ADDRSTRLEN];
+
+	inet_ntop( AF_INET, &(((struct sockaddr_in*)to)->sin_addr), ip4, INET_ADDRSTRLEN);
+	printf( "sending to %s!", ip4 );
 
 	numbytes = sendto( pnet->socket, inbuf, inlen, 0, to, tolen );
 	if( numbytes < inlen )
@@ -438,9 +426,9 @@ bool net_send( struct net *pnet, void *inbuf, int inlen, struct sockaddr *to, in
 }
 
 /* Send a packet without game state data (syn, ack, etc) */
-void net_simple_packet( struct net *pnet, uint8_t type, struct sockaddr *to, int tolen )
+bool net_simple_packet( struct net *pnet, uint8_t type, struct sockaddr *to, int tolen )
 {
-	net_send( pnet, &type, 1, to, tolen );
+	return net_send( pnet, &type, 1, to, tolen );
 }
 
 void *net_thread( void *ptr )
@@ -505,6 +493,8 @@ int main( int argc, char **argv )
 {
 	struct net net;
 	running = true;
+	struct sockaddr_in ipaddr;
+	int ipaddrlen;
 
 	if( argc > 1 )
 	{
@@ -540,7 +530,18 @@ int main( int argc, char **argv )
 
 		if( net.type == NET_JOIN )
 		{
-			net_simple_packet( &net, PACKET_SYN, (struct sockaddr*)net.addr, net.addrlen );
+			ipaddr.sin_family = AF_INET;
+			ipaddr.sin_addr.s_addr = inet_addr( argv[2] );
+			ipaddr.sin_port = htons( (unsigned short)atoi( PORTNUM ) );
+			ipaddrlen = sizeof( ipaddr );
+
+			net.addr = (struct sockaddr*)&ipaddr;
+			net.addrlen = ipaddrlen;
+
+			if( !net_simple_packet( &net, PACKET_SYN, (struct sockaddr*)net.addr, net.addrlen ) )
+			{
+				printf( "simple packet send error" );
+			}
 			net.state = NET_STATE_WAIT_ACK;
 		}
 		else
