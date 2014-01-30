@@ -353,6 +353,7 @@ bool net_bind( struct net *pnet )
 	memset( &hints, 0, sizeof( struct addrinfo ) );
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = AI_PASSIVE;
 
 	if( getaddrinfo( NULL, pnet->port, &hints, &servinfo ) != 0 )
 	{
