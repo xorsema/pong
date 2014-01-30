@@ -60,6 +60,7 @@ bool net_recv( struct net *, void *, int, int *, struct sockaddr*, int* );
 bool net_send( struct net *, void *, int, struct sockaddr *, int );
 bool net_simple_packet( struct net *, uint8_t, struct sockaddr *, int );
 void *net_thread( void * );
+bool net_send_update( struct net *, struct sockaddr *, int );
 
 const char *WINDOW_TITLE = "Pong";
 const int WIN_WIDTH = 640;
@@ -98,6 +99,7 @@ SDL_Window *window;
 SDL_Renderer *renderer;
 bool running;
 Uint32 delta;
+struct net net;
 
 struct player player1, player2;
 struct ball ball;
@@ -220,39 +222,50 @@ void loop()
 			input( event );
 		}
 
-		if( player1.status[0] )
+		if( net.type == NET_LOCAL || net.type == NET_HOST )
 		{
-			player1.offset -= PADDLE_SPEED * ( delta / 1000.f );
+	  		if( player1.status[0] )
+			{
+				player1.offset -= PADDLE_SPEED * ( delta / 1000.f );
+			}
+			
+			if( player1.status[1] )
+			{
+				player1.offset += PADDLE_SPEED * ( delta / 1000.f );
+			}
 		}
 
-		if( player1.status[1] )
-		{
-			player1.offset += PADDLE_SPEED * ( delta / 1000.f );
+		if( net.type == NET_LOCAL || net.type == NET_JOIN )
+		{	
+			if( player2.status[1] )
+			{
+				player2.offset -= PADDLE_SPEED * ( delta / 1000.f );
+			}
+			
+			if( player2.status[0] )
+			{
+				player2.offset += PADDLE_SPEED * ( delta / 1000.f );
+			}
 		}
-
-		if( player2.status[1] )
-		{
-			player2.offset -= PADDLE_SPEED * ( delta / 1000.f );
-		}
-
-		if( player2.status[0] )
-		{
-			player2.offset += PADDLE_SPEED * ( delta / 1000.f );
-		}
-
 
 		player1.rect[0].y = player1.offset;
 		player2.rect[0].x = player2.offset;
 		player1.rect[1].y = player1.offset;
 		player2.rect[1].x = player2.offset;
 
-		ball.x += ball.xv * ( delta / 1000.f );
-		ball.y += ball.yv * ( delta / 1000.f );
+		if( net.type == NET_LOCAL || net.type == NET_HOST )
+		{
+			ball.x += ball.xv * ( delta / 1000.f );
+			ball.y += ball.yv * ( delta / 1000.f );
+		}
 
 		ball.rect.x = ball.x;
 		ball.rect.y = ball.y;
 
-		handle_ball();
+		if( net.type == NET_LOCAL || net.type == NET_HOST )
+		{
+			handle_ball();
+		}
 
 		SDL_RenderClear( renderer );
 
@@ -431,6 +444,24 @@ bool net_simple_packet( struct net *pnet, uint8_t type, struct sockaddr *to, int
 	return net_send( pnet, &type, 1, to, tolen );
 }
 
+bool net_send_update( struct net *pnet, struct sockaddr *to, int tolen )
+{
+	uint8_t buf[sizeof(char) + ( sizeof(float) * 6 )];
+
+	buf[0] = PACKET_UPDATE;
+
+	float *fp = (float*)( buf+1 );
+	fp[0] = player1.offset;
+	fp[1] = player2.offset;
+
+	fp[2] = ball.x;
+	fp[3] = ball.y;
+	fp[4] = ball.xv;
+	fp[5] = ball.yv;
+
+	return net_send( pnet, buf, sizeof(buf), to, tolen );
+}
+
 void *net_thread( void *ptr )
 {
 	uint8_t buf[MAXPACKETSIZE];
@@ -468,12 +499,30 @@ void *net_thread( void *ptr )
 			if( *(uint8_t*)&buf[0] == PACKET_SYNACK )
 			{
 				pnet->state = NET_STATE_GAME;
+				net_send_update( pnet, (struct sockaddr*)&from, fromlen );
 			}
 			break;
 		case NET_STATE_GAME:
 			if( *(uint8_t*)&buf[0] == PACKET_UPDATE )
 			{
-				//...
+				float *fp = (float*)( buf+1 );
+				
+				if( net.type == NET_HOST )
+				{
+					player2.offset = fp[1];
+				}
+
+				if( net.type == NET_JOIN )
+				{
+					player1.offset = fp[0];
+
+					ball.x = fp[2];
+					ball.y = fp[3];
+					ball.xv = fp[4];
+					ball.yv = fp[5];
+				}
+
+				net_send_update( pnet, (struct sockaddr*)&from, fromlen );
 			}
 			break;
 		}
@@ -491,7 +540,6 @@ void net_create_thread( struct net *pnet )
 
 int main( int argc, char **argv )
 {
-	struct net net;
 	running = true;
 	struct sockaddr_in ipaddr;
 	int ipaddrlen;
