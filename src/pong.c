@@ -493,7 +493,7 @@ void *net_thread( void *ptr )
 		case NET_STATE_WAIT_ACK:
 			if( *(uint8_t*)&buf[0] == PACKET_ACK )
 			{
-				net_simple_packet( pnet, PACKET_SYNACK, (struct sockaddr*)&from, fromlen );
+				net_simple_packet( pnet, PACKET_SYNACK, net.addr, net.addrlen );
 				pnet->state = NET_STATE_GAME;
 			}
 			break;
@@ -528,7 +528,14 @@ void *net_thread( void *ptr )
 					ball.yv = fp[5];
 				}
 
-				net_send_update( pnet, (struct sockaddr*)&from, fromlen );
+				if( net.type == NET_HOST )
+				{
+					net_send_update( pnet, (struct sockaddr*)&from, fromlen );
+				} 
+				else
+				{
+					net_send_update( pnet, net.addr, net.addrlen );
+				}
 			}
 			break;
 		}
