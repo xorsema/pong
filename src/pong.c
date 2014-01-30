@@ -432,6 +432,8 @@ bool net_send( struct net *pnet, void *inbuf, int inlen, struct sockaddr *to, in
 	numbytes = sendto( pnet->socket, inbuf, inlen, 0, to, tolen );
 	if( numbytes < inlen )
 	{
+		printf( "Packet failed to send!" );
+		fflush(stdout);
 		return false;
 	}
 
@@ -498,6 +500,8 @@ void *net_thread( void *ptr )
 		case NET_STATE_WAIT_SYNACK:
 			if( *(uint8_t*)&buf[0] == PACKET_SYNACK )
 			{
+				printf( "Got SYNACK\n" );
+				fflush(stdout);
 				pnet->state = NET_STATE_GAME;
 				net_send_update( pnet, (struct sockaddr*)&from, fromlen );
 			}
@@ -505,6 +509,8 @@ void *net_thread( void *ptr )
 		case NET_STATE_GAME:
 			if( *(uint8_t*)&buf[0] == PACKET_UPDATE )
 			{
+				printf( "Got update\n" );
+				fflush(stdout);
 				float *fp = (float*)( buf+1 );
 				
 				if( net.type == NET_HOST )
