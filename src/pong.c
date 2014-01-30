@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <errno.h>
 
 #include <sys/unistd.h>
 #include <sys/types.h>
@@ -42,7 +43,7 @@ struct net
 	char *node;
 	int socket;
 	struct sockaddr *addr;
-	socklen_t addrlen;
+	int addrlen;
 	int state;
 	int type;
 };
@@ -55,9 +56,9 @@ void white_rect( SDL_Rect * );
 void reset_ball();
 void handle_ball();
 bool net_bind( struct net * );
-bool net_recv( struct net *, void *, int, int * );
-bool net_send( struct net *, void *, int );
-void net_simple_packet( struct net *, uint8_t );
+bool net_recv( struct net *, void *, int, int *, struct sockaddr*, int* );
+bool net_send( struct net *, void *, int, struct sockaddr *, int );
+void net_simple_packet( struct net *, uint8_t, struct sockaddr *, int );
 void *net_thread( void * );
 
 const char *WINDOW_TITLE = "Pong";
@@ -353,22 +354,25 @@ bool net_bind( struct net *pnet )
 	memset( &hints, 0, sizeof( struct addrinfo ) );
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_DGRAM;
-	hints.ai_flags = AI_PASSIVE;
 
-	if( getaddrinfo( pnet->node, pnet->port, &hints, &servinfo ) != 0 )
+	if( getaddrinfo( NULL, pnet->port, &hints, &servinfo ) != 0 )
 	{
+		printf( "getaddrinfo error\n" );
 		return false;
 	}
 
 	for( p = servinfo; p != NULL; p = p->ai_next )
 	{
+	
 		if( ( result = socket( p->ai_family, p->ai_socktype, p->ai_protocol ) ) == -1 )
 		{
+			perror( "socket" );
 			continue;
 		}
 
 		if( bind( result, p->ai_addr, p->ai_addrlen ) == -1 )
 		{
+		        perror( "bind" );
 			continue;
 		}
 
@@ -379,24 +383,37 @@ bool net_bind( struct net *pnet )
 
 	if( p == NULL )
 	{
+		printf( "nothing to bind to\n" );
 		return false;
 	}
-	
-	pnet->addr = p->ai_addr;
-	pnet->addrlen = p->ai_addrlen;
+
 	pnet->socket = result;
+
+	if( pnet->type == NET_JOIN )
+	{
+		memset( &hints, 0, sizeof( struct addrinfo ) );
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_DGRAM;
+		
+		if( getaddrinfo( pnet->node, pnet->port, &hints, &servinfo ) != 0 )
+		{
+			printf( "getaddrinfo error\n" );
+			return false;
+		}
+		
+		pnet->addr = servinfo->ai_addr;
+		pnet->addrlen = servinfo->ai_addrlen;
+	}
 
 	return true;
 }
 
-bool net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen )
+bool net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen, struct sockaddr *from, int *fromlen )
 {
 	uint8_t buf[MAXPACKETSIZE];
-	struct sockaddr_storage from;
-	int fromlen;
 	int numbytes;
 
-	numbytes = recvfrom( pnet->socket, buf, MAXPACKETSIZE, 0, (struct sockaddr* )&from, &fromlen );
+	numbytes = recvfrom( pnet->socket, buf, MAXPACKETSIZE, 0, from, fromlen );
 	if( numbytes == -1 || numbytes > buflen )
 	{
 		return false;
@@ -407,11 +424,11 @@ bool net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen )
 	return true;
 }
 
-bool net_send( struct net *pnet, void *inbuf, int inlen )
+bool net_send( struct net *pnet, void *inbuf, int inlen, struct sockaddr *to, int tolen )
 {
 	int numbytes;
 
-	numbytes = sendto( pnet->socket, inbuf, inlen, 0, pnet->addr, pnet->addrlen );
+	numbytes = sendto( pnet->socket, inbuf, inlen, 0, to, tolen );
 	if( numbytes < inlen )
 	{
 		return false;
@@ -421,9 +438,9 @@ bool net_send( struct net *pnet, void *inbuf, int inlen )
 }
 
 /* Send a packet without game state data (syn, ack, etc) */
-void net_simple_packet( struct net *pnet, uint8_t type )
+void net_simple_packet( struct net *pnet, uint8_t type, struct sockaddr *to, int tolen )
 {
-	net_send( pnet, &type, 1 );
+	net_send( pnet, &type, 1, to, tolen );
 }
 
 void *net_thread( void *ptr )
@@ -432,10 +449,12 @@ void *net_thread( void *ptr )
 	int buflen = MAXPACKETSIZE;
 	int recvbytes;
 	struct net *pnet = (struct net*)ptr;
+	struct sockaddr_storage from;
+	int fromlen;
 
 	while( running )
 	{
-		if( !net_recv( pnet, buf, buflen, &recvbytes ) )
+		if( !net_recv( pnet, buf, buflen, &recvbytes, (struct sockaddr*)&from, &fromlen ) )
 		{
 			continue;
 		}
@@ -445,14 +464,14 @@ void *net_thread( void *ptr )
 		case NET_STATE_WAIT_SYN:
 			if( *(uint8_t*)&buf[0] == PACKET_SYN )
 			{
-				net_simple_packet( pnet, PACKET_ACK );
+				net_simple_packet( pnet, PACKET_ACK, (struct sockaddr*)&from, fromlen );
 				pnet->state = NET_STATE_WAIT_SYNACK;
 			}
 			break;
 		case NET_STATE_WAIT_ACK:
 			if( *(uint8_t*)&buf[0] == PACKET_ACK )
 			{
-				net_simple_packet( pnet, PACKET_SYNACK );
+				net_simple_packet( pnet, PACKET_SYNACK, (struct sockaddr*)&from, fromlen );
 				pnet->state = NET_STATE_GAME;
 			}
 			break;
@@ -495,12 +514,10 @@ int main( int argc, char **argv )
 				printf( "Please specify a host to connect to!\n" );
 				return 1;
 			}
-			net.node = argv[2];
 			net.type = NET_JOIN;
 		}
 		else if( strcmp( "host", argv[1] ) == 0 )
 		{
-			net.node = NULL;
 			net.type = NET_HOST;
 			net.state = NET_STATE_WAIT_SYN;
 		}
@@ -521,7 +538,7 @@ int main( int argc, char **argv )
 
 		if( net.type == NET_JOIN )
 		{
-			net_simple_packet( &net, PACKET_SYN );
+			net_simple_packet( &net, PACKET_SYN, (struct sockaddr*)net.addr, net.addrlen );
 			net.state = NET_STATE_WAIT_ACK;
 		}
 		else
