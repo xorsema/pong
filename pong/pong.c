@@ -1,29 +1,22 @@
-#include <SDL2/SDL.h>
+#include <SDL.h>
+#include <SDL_net.h>
 #include <stdio.h>
-#include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <math.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <errno.h>
 
-#include <sys/unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-
 #define MAXPACKETSIZE 512
-#define PORTNUM "1200"
+#define PORTNUM 1200
 
-#define dist_form( x, y ) ( sqrt( pow( x, 2 ) + pow( y, 2 ) ) )
+#define dist_form( x, y ) ( sqrt( ( x * x ) + ( y * y ) ) )
 
 struct player
 {
 	SDL_Rect rect[2];
 	float offset;
-	bool status[2];
+	int status[2];
 	int score;
 	SDL_mutex *mutex;
 };
@@ -33,34 +26,31 @@ struct ball
 	float x, y;
 	float xv, yv;
 	SDL_Rect rect;
-	bool colliding;
+	int colliding;
 	SDL_mutex *mutex;
 };
 
 struct net
 {
-	char port[6];
-	char *node;
-	int socket;
-	struct sockaddr *addr;
-	int addrlen;
+	UDPsocket socket;
+	IPaddress addr;
 	int state;
 	int type;
 };
 
-bool init();
+int init();
 void quit();
 void input( SDL_Event );
 void loop();
 void white_rect( SDL_Rect * );
 void reset_ball();
 void handle_ball();
-bool net_bind( struct net * );
-bool net_recv( struct net *, void *, int, int *, struct sockaddr*, int* );
-bool net_send( struct net *, void *, int, struct sockaddr *, int );
-bool net_simple_packet( struct net *, uint8_t, struct sockaddr *, int );
-void *net_thread( void * );
-bool net_send_update( struct net *, struct sockaddr *, int );
+int net_bind( struct net * );
+int net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen, IPaddress *ip );
+int net_send( struct net *pnet, void *inbuf, int inlen, IPaddress to );
+int net_simple_packet( struct net *pnet, uint8_t type, IPaddress to );
+int net_thread( void * );
+int net_send_update( struct net *pnet, IPaddress to );
 
 const char *WINDOW_TITLE = "Pong";
 const int WIN_WIDTH = 640;
@@ -97,14 +87,14 @@ enum
 
 SDL_Window *window;
 SDL_Renderer *renderer;
-bool running;
+int running;
 Uint32 delta;
 struct net net;
 
 struct player player1, player2;
 struct ball ball;
 
-bool init()
+int init()
 {
 	window = SDL_CreateWindow( WINDOW_TITLE, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_WIDTH, WIN_HEIGHT, 0 );
 	renderer = SDL_CreateRenderer( window, -1, SDL_RENDERER_ACCELERATED );
@@ -129,7 +119,7 @@ bool init()
 	player1.rect[1].x = WIN_WIDTH - player1.rect[1].w;
 	player2.rect[1].y = WIN_HEIGHT - player2.rect[1].h;
 
-	ball.colliding = false;
+	ball.colliding = 0;
 
 	player1.mutex = SDL_CreateMutex();
 	player2.mutex = SDL_CreateMutex();
@@ -158,25 +148,25 @@ void input( SDL_Event event )
 	switch( event.type )
 	{
 	case SDL_QUIT:
-		running = false;
+		running = 0;
 		break;
 		
 	case SDL_KEYDOWN:
 		if( event.key.keysym.sym == SDLK_DOWN )
 		{
-			player1.status[1] = true;
+			player1.status[1] = 1;
 		}
 		if( event.key.keysym.sym == SDLK_UP )
 		{
-			player1.status[0] = true;
+			player1.status[0] = 1;
 		}
 		if( event.key.keysym.sym == SDLK_a )
 		{
-			player2.status[1] = true;
+			player2.status[1] = 1;
 		}
 		if( event.key.keysym.sym == SDLK_d )
 		{
-			player2.status[0] = true;
+			player2.status[0] = 1;
 		}
 
 		break;
@@ -184,20 +174,20 @@ void input( SDL_Event event )
 	case SDL_KEYUP:
 		if( event.key.keysym.sym == SDLK_DOWN )
 		{
-			player1.status[1] = false;
+			player1.status[1] = 0;
 		}
 		if( event.key.keysym.sym == SDLK_UP )
 		{
-			player1.status[0] = false;
+			player1.status[0] = 0;
 		}
 
 		if( event.key.keysym.sym == SDLK_a )
 		{
-			player2.status[1] = false;
+			player2.status[1] = 0;
 		}
 		if( event.key.keysym.sym == SDLK_d )
 		{
-			player2.status[0] = false;
+			player2.status[0] = 0;
 		}
 
 		if( event.key.keysym.sym == SDLK_r )
@@ -302,6 +292,8 @@ void reset_ball()
 
 void handle_ball()
 {
+	SDL_Rect *p;
+	float dist;
 	if( ball.x + BALL_SIZE < 0 )
 	{
 		player2.score ++;
@@ -328,7 +320,7 @@ void handle_ball()
 		return;
 	}
 
-        SDL_Rect *p = NULL;
+    p = (SDL_Rect*)NULL;
 
 	if( SDL_HasIntersection( &ball.rect, &player1.rect[0] ) )
 		p = &player1.rect[0];
@@ -339,120 +331,103 @@ void handle_ball()
 	if( SDL_HasIntersection( &ball.rect, &player2.rect[1] ) )
 		p = &player2.rect[1];
 
-	if( p != NULL && ball.colliding == false )
+	if( p != NULL && ball.colliding == 0 )
 	{
 		ball.xv = ( ( ( ball.x + BALL_SIZE / 2.0 ) - (p->x + p->w / 2.0 ) )  );
 		ball.yv = ( ( ball.y + BALL_SIZE / 2.0 ) - (p->y + p->h / 2.0 ) );
-		float dist = dist_form( ball.xv, ball.yv );
+		dist = dist_form( ball.xv, ball.yv );
 		ball.xv /= dist;
 		ball.yv /= dist;
 		ball.xv *= BALL_SPEED;
 		ball.yv *= BALL_SPEED;
-		ball.colliding = true;
+		ball.colliding = 1;
 	}
 
 	if ( p == NULL )
 	{
-		ball.colliding = false;
+		ball.colliding = 0;
 	}
 }
 
-bool net_bind( struct net *pnet )
+int net_bind( struct net *pnet )
 {
-	struct addrinfo hints;
-	struct addrinfo *servinfo, *p;
-	int result;
-
-	memset( &hints, 0, sizeof( struct addrinfo ) );
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_DGRAM;
-	hints.ai_flags = AI_PASSIVE;
-
-	if( getaddrinfo( NULL, pnet->port, &hints, &servinfo ) != 0 )
+	SDLNet_ResolveHost( &pnet->addr, NULL, PORTNUM );
+	pnet->socket = SDLNet_UDP_Open( PORTNUM );
+	if( pnet->socket == 0 )
 	{
-		printf( "getaddrinfo error\n" );
-		return false;
-	}
-
-	for( p = servinfo; p != NULL; p = p->ai_next )
-	{
-	
-		if( ( result = socket( p->ai_family, p->ai_socktype, p->ai_protocol ) ) == -1 )
-		{
-			perror( "socket" );
-			continue;
-		}
-
-		if( bind( result, p->ai_addr, p->ai_addrlen ) == -1 )
-		{
-		        perror( "bind" );
-			continue;
-		}
-
-		break;
-	}
-
-	freeaddrinfo( servinfo );
-
-	if( p == NULL )
-	{
-		printf( "nothing to bind to\n" );
-		return false;
-	}
-
-	pnet->socket = result;
-
-	return true;
-}
-
-bool net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen, struct sockaddr *from, int *fromlen )
-{
-	uint8_t buf[MAXPACKETSIZE];
-	int numbytes;
-
-	numbytes = recvfrom( pnet->socket, buf, MAXPACKETSIZE, 0, from, fromlen );
-	if( numbytes == -1 || numbytes > buflen )
-	{
-		return false;
+		printf( "%s", SDLNet_GetError() );
+		return 0;
 	}
 	
-	memcpy( outbuf, buf, numbytes );
-	*outlen = numbytes;
-	return true;
+	printf( "Bound on port: %u\n", ( SDL_BYTEORDER == SDL_LIL_ENDIAN ) ? SDL_Swap16( pnet->addr.port ) : pnet->addr.port );
+
+	return 1;
 }
 
-bool net_send( struct net *pnet, void *inbuf, int inlen, struct sockaddr *to, int tolen )
+int net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen, IPaddress *ip )
 {
-	int numbytes;
-	char ip4[INET_ADDRSTRLEN];
+	UDPpacket *p;
+	int err;
 
-	inet_ntop( AF_INET, &(((struct sockaddr_in*)to)->sin_addr), ip4, INET_ADDRSTRLEN);
-	printf( "sending to %s!", ip4 );
+	p = SDLNet_AllocPacket( MAXPACKETSIZE );
 
-	numbytes = sendto( pnet->socket, inbuf, inlen, 0, to, tolen );
-	if( numbytes < inlen )
+	if( ( err = SDLNet_UDP_Recv( pnet->socket, p ) ) > 0 )
 	{
-		printf( "Packet failed to send!" );
-		fflush(stdout);
-		return false;
+		memcpy( outbuf, p->data, p->len );
+		*outlen = p->len;
+		*ip = p->address;
+		return 1;
+	}
+	else if( err == -1 )
+	{
+		printf( "%s", SDLNet_GetError() );
+		return 0;
 	}
 
-	return true;
+	SDLNet_FreePacket( p );
+	
+	return 0;
+}
+
+int net_send( struct net *pnet, void *inbuf, int inlen, IPaddress to )
+{
+	UDPpacket *p;
+	int err;
+
+	p = SDLNet_AllocPacket( MAXPACKETSIZE );
+
+	p->address.host = to.host;
+	p->address.port = to.port;
+
+	memcpy( p->data, inbuf, inlen );
+
+	p->len = inlen;
+
+	err = SDLNet_UDP_Send( pnet->socket, -1, p );
+	if( err == 0 )
+	{
+		printf( "Failed to send packet: %s", SDLNet_GetError() );
+		fflush( stdout );
+	}
+
+	SDLNet_FreePacket( p );
+
+	return err;
 }
 
 /* Send a packet without game state data (syn, ack, etc) */
-bool net_simple_packet( struct net *pnet, uint8_t type, struct sockaddr *to, int tolen )
+int net_simple_packet( struct net *pnet, uint8_t type, IPaddress to )
 {
-	return net_send( pnet, &type, 1, to, tolen );
+	return net_send( pnet, (void*)&type, 1, to );
 }
 
-bool net_send_update( struct net *pnet, struct sockaddr *to, int tolen )
+int net_send_update( struct net *pnet, IPaddress to )
 {
+	float *fp;
 	uint8_t buf[sizeof(char) + ( sizeof(float) * 6 )];
-
 	buf[0] = PACKET_UPDATE;
 
-	float *fp = (float*)( buf+1 );
+	fp = (float*)( buf+1 );
 	fp[0] = player1.offset;
 	fp[1] = player2.offset;
 
@@ -461,39 +436,43 @@ bool net_send_update( struct net *pnet, struct sockaddr *to, int tolen )
 	fp[4] = ball.xv;
 	fp[5] = ball.yv;
 
-	return net_send( pnet, buf, sizeof(buf), to, tolen );
+	return net_send( pnet, buf, sizeof(buf), to );
 }
 
-void *net_thread( void *ptr )
+int net_thread( void *ptr )
 {
 	uint8_t buf[MAXPACKETSIZE];
 	int buflen = MAXPACKETSIZE;
 	int recvbytes;
 	struct net *pnet = (struct net*)ptr;
-	struct sockaddr_storage from;
-	int fromlen;
+	float *fp;
+	IPaddress ip;
 
 	while( running )
 	{
-		if( !net_recv( pnet, buf, buflen, &recvbytes, (struct sockaddr*)&from, &fromlen ) )
+		if( !net_recv( pnet, (void*)buf, buflen, &recvbytes, &ip ) )
 		{
 			continue;
 		}
+
+/*		printf( "Packet received!\n" );  */
 
 		switch( pnet->state )
 		{
 		case NET_STATE_WAIT_SYN:
 			if( *(uint8_t*)&buf[0] == PACKET_SYN )
 			{
-				printf( "SYN received\n" );
-				net_simple_packet( pnet, PACKET_ACK, (struct sockaddr*)&from, fromlen );
+				printf( "SYN received, sending ACK\n" );
+				pnet->addr.host = ip.host;
+				net_simple_packet( pnet, PACKET_ACK, pnet->addr );
 				pnet->state = NET_STATE_WAIT_SYNACK;
 			}
 			break;
 		case NET_STATE_WAIT_ACK:
 			if( *(uint8_t*)&buf[0] == PACKET_ACK )
 			{
-				net_simple_packet( pnet, PACKET_SYNACK, net.addr, net.addrlen );
+				printf( "ACK received, sending SYNACK\n" );
+				net_simple_packet( pnet, PACKET_SYNACK, pnet->addr );
 				pnet->state = NET_STATE_GAME;
 			}
 			break;
@@ -501,17 +480,15 @@ void *net_thread( void *ptr )
 			if( *(uint8_t*)&buf[0] == PACKET_SYNACK )
 			{
 				printf( "Got SYNACK\n" );
-				fflush(stdout);
 				pnet->state = NET_STATE_GAME;
-				net_send_update( pnet, (struct sockaddr*)&from, fromlen );
+				net_send_update( pnet, pnet->addr );
 			}
 			break;
 		case NET_STATE_GAME:
 			if( *(uint8_t*)&buf[0] == PACKET_UPDATE )
 			{
-				printf( "Got update\n" );
-				fflush(stdout);
-				float *fp = (float*)( buf+1 );
+				/*printf( "Got update\n" );*/
+				fp = (float*)( buf+1 );
 				
 				if( net.type == NET_HOST )
 				{
@@ -530,11 +507,11 @@ void *net_thread( void *ptr )
 
 				if( net.type == NET_HOST )
 				{
-					net_send_update( pnet, (struct sockaddr*)&from, fromlen );
+					net_send_update( pnet, pnet->addr );
 				} 
 				else
 				{
-					net_send_update( pnet, net.addr, net.addrlen );
+					net_send_update( pnet, pnet->addr );
 				}
 			}
 			break;
@@ -542,27 +519,30 @@ void *net_thread( void *ptr )
 
 		memset( buf, 0, MAXPACKETSIZE );
 	}
+
+	return 0;
 }
 
 void net_create_thread( struct net *pnet )
 {
-	pthread_t t;
-
-	pthread_create( &t, NULL, net_thread, pnet );
+	SDL_CreateThread(net_thread, "net", pnet);
 }
 
 int main( int argc, char **argv )
 {
-	running = true;
-	struct sockaddr_in ipaddr;
-	int ipaddrlen;
+	running = 1;
+
+	if( SDLNet_Init() < 0 )
+	{
+		printf( "Couldn't start SDLNet!" );
+		return 1;
+	}
 
 	if( argc > 1 )
 	{
-		strcpy( net.port, PORTNUM );
 		if( strcmp( "join", argv[1] ) == 0 )
 		{
-			if( argc < 2 )
+			if( argc < 3 )
 			{
 				printf( "Please specify a host to connect to!\n" );
 				return 1;
@@ -586,22 +566,13 @@ int main( int argc, char **argv )
 			return 1;
 		}
 
-		printf( "Bound to port %s\n", net.port );
-		fflush( stdout );
-
 		if( net.type == NET_JOIN )
 		{
-			ipaddr.sin_family = AF_INET;
-			ipaddr.sin_addr.s_addr = inet_addr( argv[2] );
-			ipaddr.sin_port = htons( (unsigned short)atoi( PORTNUM ) );
-			ipaddrlen = sizeof( ipaddr );
+			SDLNet_ResolveHost( &net.addr, argv[2], PORTNUM );
 
-			net.addr = (struct sockaddr*)&ipaddr;
-			net.addrlen = ipaddrlen;
-
-			if( !net_simple_packet( &net, PACKET_SYN, (struct sockaddr*)net.addr, net.addrlen ) )
+			if( !net_simple_packet( &net, PACKET_SYN, net.addr ) )
 			{
-				printf( "simple packet send error" );
+				printf( "simple packet send error: %s", SDLNet_GetError() );
 			}
 			net.state = NET_STATE_WAIT_ACK;
 		}
