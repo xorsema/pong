@@ -17,7 +17,6 @@ struct player
 {
 	SDL_Rect rect[2];
 	float offset;
-	int status[2];
 	int score;
 };
 
@@ -27,6 +26,12 @@ struct ball
 	float xv, yv;
 	SDL_Rect rect;
 	int colliding;
+};
+
+struct gamestate
+{
+	struct player players[2];
+	struct ball ball;
 };
 #pragma pack(pop)
 
@@ -41,7 +46,7 @@ struct net
 #pragma pack(push, 4)
 struct cmd
 {
-	int type;
+	uint32_t type;
 	uint32_t time;
 	union
 	{
@@ -64,12 +69,31 @@ struct cmd_net_buf
 	uint32_t len;
 	struct cmd cmds[1];
 };
+
+struct simple_packet
+{
+	uint32_t type;
+};
+
+struct cmd_packet
+{
+	uint32_t type;
+	struct cmd_net_buf buf;
+};
+
+struct update_packet
+{
+	uint32_t type;
+	struct gamestate state;
+};
 #pragma pack(pop)
 
 int init();
 void quit();
 void input( SDL_Event );
 void loop();
+void init_gamestate( struct gamestate *g );
+void render_gamestate( struct gamestate *g );
 void white_rect( SDL_Rect * );
 void reset_ball( struct ball *pball );
 void handle_ball( struct ball *pball, struct player *p1p, struct player *p2p );
@@ -79,11 +103,11 @@ void player_move_cmd( struct cmd *out, int type, float offset );
 int add_to_cmd_buf( struct cmd_buf *buf, struct cmd cmd );
 void clear_cmd_buf( struct cmd_buf *p );
 struct cmd_net_buf *cmd_to_net( struct cmd_buf *in );
-void advance_gamestate( uint32_t start, uint32_t duration, uint32_t timestep, struct ball *pball, struct player *p1p, struct player *p2p, struct cmd_buf *buf );
+void advance_gamestate( uint32_t start, uint32_t duration, uint32_t timestep, struct gamestate *gs, struct cmd_buf *buf );
 int net_bind( struct net * );
 int net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen, IPaddress *ip );
 int net_send( struct net *pnet, void *inbuf, int inlen, IPaddress to );
-int net_simple_packet( struct net *pnet, uint8_t type, IPaddress to );
+int net_simple_packet( struct net *pnet, struct simple_packet* packet, IPaddress to );
 int net_thread( void * );
 int net_send_update( struct net *pnet, IPaddress to );
 
@@ -109,7 +133,8 @@ enum
 	PACKET_SYN = 1,
 	PACKET_ACK = 2,
 	PACKET_SYNACK = 3,
-	PACKET_UPDATE = 4
+	PACKET_UPDATE = 4,
+	PACKET_CMD = 5
 };
 
 enum
@@ -134,37 +159,17 @@ int running;
 uint32_t start_time;
 uint32_t current_time;
 Uint32 delta;
+int input_status[4];
 struct net net;
-
-struct player player1, player2;
-struct ball ball;
+struct gamestate local_state;
+struct cmd_buf *local_cmd_buf;
 
 int init()
 {
 	window = SDL_CreateWindow( WINDOW_TITLE, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIN_WIDTH, WIN_HEIGHT, 0 );
 	renderer = SDL_CreateRenderer( window, -1, SDL_RENDERER_ACCELERATED );
 
-	player1.rect[0].w = PADDLE_WIDTH;
-	player1.rect[0].h = PADDLE_HEIGHT;
-
-	player1.rect[1].w = PADDLE_WIDTH;
-	player1.rect[1].h = PADDLE_HEIGHT;
-
-	player2.rect[0].w = PADDLE_HEIGHT;
-	player2.rect[0].h = PADDLE_WIDTH;
-
-	player2.rect[1].w = PADDLE_HEIGHT;
-	player2.rect[1].h = PADDLE_WIDTH;
-
-	ball.rect.w = BALL_SIZE;
-	ball.rect.h = BALL_SIZE;
-
-	reset_ball( &ball );
-
-	player1.rect[1].x = WIN_WIDTH - player1.rect[1].w;
-	player2.rect[1].y = WIN_HEIGHT - player2.rect[1].h;
-
-	ball.colliding = 0;
+	init_gamestate( &local_state );
 
 	return ( ( window != NULL ) && ( renderer != NULL ) );
 }
@@ -195,19 +200,19 @@ void input( SDL_Event event )
 	case SDL_KEYDOWN:
 		if( event.key.keysym.sym == SDLK_DOWN )
 		{
-			player1.status[1] = 1;
+			input_status[1] = 1;
 		}
 		if( event.key.keysym.sym == SDLK_UP )
 		{
-			player1.status[0] = 1;
+			input_status[0] = 1;
 		}
 		if( event.key.keysym.sym == SDLK_a )
 		{
-			player2.status[1] = 1;
+			input_status[3] = 1;
 		}
 		if( event.key.keysym.sym == SDLK_d )
 		{
-			player2.status[0] = 1;
+			input_status[2] = 1;
 		}
 
 		break;
@@ -215,26 +220,26 @@ void input( SDL_Event event )
 	case SDL_KEYUP:
 		if( event.key.keysym.sym == SDLK_DOWN )
 		{
-			player1.status[1] = 0;
+			input_status[1] = 0;
 		}
 		if( event.key.keysym.sym == SDLK_UP )
 		{
-			player1.status[0] = 0;
+			input_status[0] = 0;
 		}
 
 		if( event.key.keysym.sym == SDLK_a )
 		{
-			player2.status[1] = 0;
+			input_status[3] = 0;
 		}
 		if( event.key.keysym.sym == SDLK_d )
 		{
-			player2.status[0] = 0;
+			input_status[2] = 0;
 		}
 
 		if( event.key.keysym.sym == SDLK_r )
 		{
-			reset_ball( &ball );
-			ball.xv = -BALL_SPEED;
+			reset_ball( &local_state.ball );
+			local_state.ball.xv = -BALL_SPEED;
 		}
 
 		break;
@@ -243,13 +248,12 @@ void input( SDL_Event event )
 
 void loop()
 {
-	struct cmd_buf *cb;
 	struct cmd tc;
 	SDL_Event event;
 	Uint32 ticks = SDL_GetTicks();
 	start_time = ticks;
 
-	cb = init_cmd_buf( 512 );
+	local_cmd_buf = init_cmd_buf( 512 );
 
 	while( running )
 	{
@@ -260,46 +264,41 @@ void loop()
 
 		if( net.type == NET_LOCAL || net.type == NET_HOST )
 		{
-	  		if( player1.status[0] )
+	  		if( input_status[0] )
 			{
 				player_move_cmd( &tc, CMD_PLAYER1_MOVE, -PADDLE_SPEED * ( delta / 1000.f ) );
-				add_to_cmd_buf( cb, tc );
+				add_to_cmd_buf( local_cmd_buf, tc );
 			}
 			
-			if( player1.status[1] )
+			if( input_status[1] )
 			{
 				player_move_cmd( &tc, CMD_PLAYER1_MOVE, PADDLE_SPEED * ( delta / 1000.f ) );
-				add_to_cmd_buf( cb, tc );
+				add_to_cmd_buf( local_cmd_buf, tc );
 			}
 		}
 
 		if( net.type == NET_LOCAL || net.type == NET_JOIN )
 		{	
-			if( player2.status[1] )
+			if( input_status[3] )
 			{
 				player_move_cmd( &tc, CMD_PLAYER2_MOVE, -PADDLE_SPEED * ( delta / 1000.f ) );
-				add_to_cmd_buf( cb, tc );
+				add_to_cmd_buf( local_cmd_buf, tc );
 			}
 			
-			if( player2.status[0] )
+			if( input_status[2] )
 			{
 				player_move_cmd( &tc, CMD_PLAYER2_MOVE, PADDLE_SPEED * ( delta / 1000.f ) );
-				add_to_cmd_buf( cb, tc );
+				add_to_cmd_buf( local_cmd_buf, tc );
 			}
 		}
 
-		advance_gamestate( current_time, delta, 10, &ball, &player1, &player2, cb );
+		advance_gamestate( current_time, delta, 10, &local_state, local_cmd_buf );
 
-		clear_cmd_buf( cb );
+		clear_cmd_buf( local_cmd_buf );
 
 		SDL_RenderClear( renderer );
 
-		white_rect( &player1.rect[0] );
-		white_rect( &player2.rect[0] );
-		white_rect( &player1.rect[1] );
-		white_rect( &player2.rect[1] );
-
-		white_rect( &ball.rect );
+		render_gamestate( &local_state );
 
 		SDL_RenderPresent( renderer );
 
@@ -317,6 +316,41 @@ void white_rect( SDL_Rect *rect )
 	SDL_SetRenderDrawColor( renderer, 255, 255, 255, 255 );
 	SDL_RenderFillRect( renderer, rect );
 	SDL_SetRenderDrawColor( renderer, r, g, b, a );
+}
+
+void init_gamestate( struct gamestate *g )
+{
+	g->players[0].rect[0].w = PADDLE_WIDTH;
+	g->players[0].rect[0].h = PADDLE_HEIGHT;
+
+	g->players[0].rect[1].w = PADDLE_WIDTH;
+	g->players[0].rect[1].h = PADDLE_HEIGHT;
+
+	g->players[1].rect[0].w = PADDLE_HEIGHT;
+	g->players[1].rect[0].h = PADDLE_WIDTH;
+
+	g->players[1].rect[1].w = PADDLE_HEIGHT;
+	g->players[1].rect[1].h = PADDLE_WIDTH;
+
+	g->ball.rect.w = BALL_SIZE;
+	g->ball.rect.h = BALL_SIZE;
+
+	reset_ball( &g->ball );
+
+	g->players[0].rect[1].x = WIN_WIDTH - g->players[0].rect[1].w;
+	g->players[1].rect[1].y = WIN_HEIGHT - g->players[1].rect[1].h;
+
+	g->ball.colliding = 0;
+}
+
+void render_gamestate( struct gamestate *g )
+{
+	white_rect( &g->players[0].rect[0] );
+	white_rect( &g->players[1].rect[0] );
+	white_rect( &g->players[0].rect[1] );
+	white_rect( &g->players[1].rect[1] );
+
+	white_rect( &g->ball.rect );
 }
 
 void reset_ball( struct ball *pball )
@@ -432,7 +466,7 @@ struct cmd_net_buf *cmd_to_net( struct cmd_buf *in )
 	return r;
 }
 
-void advance_gamestate( uint32_t start, uint32_t duration, uint32_t timestep, struct ball *pball, struct player *p1p, struct player *p2p, struct cmd_buf *buf )
+void advance_gamestate( uint32_t start, uint32_t duration, uint32_t timestep, struct gamestate *gs, struct cmd_buf *buf )
 {
 	uint32_t i;
 	unsigned ci;
@@ -446,30 +480,30 @@ void advance_gamestate( uint32_t start, uint32_t duration, uint32_t timestep, st
 				switch( buf->cmds[ci].type )
 				{
 				case CMD_PLAYER1_MOVE:
-					p1p->offset += buf->cmds[ci].data.offset;
+					gs->players[0].offset += buf->cmds[ci].data.offset;
 					break;
 
 				case CMD_PLAYER2_MOVE:
-					p2p->offset += buf->cmds[ci].data.offset;
+					gs->players[1].offset += buf->cmds[ci].data.offset;
 					break;
 				}
 			}
 		}
 
-		p1p->rect[0].y = p1p->offset;
-		p2p->rect[0].x = p2p->offset;
-		p1p->rect[1].y = p1p->offset;
-		p2p->rect[1].x = p2p->offset;
+		gs->players[0].rect[0].y = gs->players[0].offset;
+		gs->players[1].rect[0].x = gs->players[1].offset;
+		gs->players[0].rect[1].y = gs->players[0].offset;
+		gs->players[1].rect[1].x = gs->players[1].offset;
 
 		if( ( i + start ) % timestep == 0 )
 		{
-			pball->x += pball->xv * ( timestep / 1000.f );
-			pball->y += pball->yv * ( timestep / 1000.f );
+			gs->ball.x += gs->ball.xv * ( timestep / 1000.f );
+			gs->ball.y += gs->ball.yv * ( timestep / 1000.f );
 
-			pball->rect.x = pball->x;
-			pball->rect.y = pball->y;
+			gs->ball.rect.x = gs->ball.x;
+			gs->ball.rect.y = gs->ball.y;
 
-			handle_ball( pball, p1p, p2p );
+			handle_ball( &gs->ball, &gs->players[0], &gs->players[1] );
 		}
 	}
 }
@@ -541,9 +575,9 @@ int net_send( struct net *pnet, void *inbuf, int inlen, IPaddress to )
 }
 
 /* Send a packet without game state data (syn, ack, etc) */
-int net_simple_packet( struct net *pnet, uint8_t type, IPaddress to )
+int net_simple_packet( struct net *pnet, struct simple_packet *packet, IPaddress to )
 {
-	return net_send( pnet, (void*)&type, 1, to );
+	return net_send( pnet, (void*)packet, sizeof(struct simple_packet), to );
 }
 
 int net_send_update( struct net *pnet, IPaddress to )
@@ -552,7 +586,7 @@ int net_send_update( struct net *pnet, IPaddress to )
 	uint8_t buf[sizeof(char) + ( sizeof(float) * 6 )];
 	buf[0] = PACKET_UPDATE;
 
-	fp = (float*)( buf+1 );
+	/*fp = (float*)( buf+1 );
 	fp[0] = player1.offset;
 	fp[1] = player2.offset;
 
@@ -560,7 +594,7 @@ int net_send_update( struct net *pnet, IPaddress to )
 	fp[3] = ball.y;
 	fp[4] = ball.xv;
 	fp[5] = ball.yv;
-
+	*/
 	return net_send( pnet, buf, sizeof(buf), to );
 }
 
@@ -570,8 +604,11 @@ int net_thread( void *ptr )
 	int buflen = MAXPACKETSIZE;
 	int recvbytes;
 	struct net *pnet = (struct net*)ptr;
-	float *fp;
 	IPaddress ip;
+	struct simple_packet *sp;
+	struct update_packet *up;
+	struct cmd_packet *cp;
+	int i;
 
 	while( running )
 	{
@@ -580,12 +617,14 @@ int net_thread( void *ptr )
 			continue;
 		}
 
+		sp = (struct simple_packet*)buf;
+
 /*		printf( "Packet received!\n" );  */
 
 		switch( pnet->state )
 		{
 		case NET_STATE_WAIT_SYN:
-			if( *(uint8_t*)&buf[0] == PACKET_SYN )
+			if( sp->type == PACKET_SYN )
 			{
 				printf( "SYN received, sending ACK\n" );
 				pnet->addr.host = ip.host;
@@ -594,7 +633,7 @@ int net_thread( void *ptr )
 			}
 			break;
 		case NET_STATE_WAIT_ACK:
-			if( *(uint8_t*)&buf[0] == PACKET_ACK )
+			if( sp->type == PACKET_ACK )
 			{
 				printf( "ACK received, sending SYNACK\n" );
 				net_simple_packet( pnet, PACKET_SYNACK, pnet->addr );
@@ -602,7 +641,7 @@ int net_thread( void *ptr )
 			}
 			break;
 		case NET_STATE_WAIT_SYNACK:
-			if( *(uint8_t*)&buf[0] == PACKET_SYNACK )
+			if( sp->type == PACKET_SYNACK )
 			{
 				printf( "Got SYNACK\n" );
 				pnet->state = NET_STATE_GAME;
@@ -610,33 +649,18 @@ int net_thread( void *ptr )
 			}
 			break;
 		case NET_STATE_GAME:
-			if( *(uint8_t*)&buf[0] == PACKET_UPDATE )
+			if( pnet->state == NET_JOIN && sp->type == PACKET_UPDATE )
 			{
-				/*printf( "Got update\n" );*/
-				fp = (float*)( buf+1 );
-				
-				if( net.type == NET_HOST )
-				{
-					player2.offset = fp[1];
-				}
+				up = (struct update_packet*)sp;
+				local_state = up->state;
+			}
 
-				if( net.type == NET_JOIN )
+			if( pnet->state == NET_HOST && sp->type == PACKET_CMD )
+			{
+				cp = (struct cmd_packet*)sp;
+				for( i = 0; i < cp->buf.len; i++ )
 				{
-					player1.offset = fp[0];
-
-					ball.x = fp[2];
-					ball.y = fp[3];
-					ball.xv = fp[4];
-					ball.yv = fp[5];
-				}
-
-				if( net.type == NET_HOST )
-				{
-					net_send_update( pnet, pnet->addr );
-				} 
-				else
-				{
-					net_send_update( pnet, pnet->addr );
+					add_to_cmd_buf( local_cmd_buf, cp->buf.cmds[i] );
 				}
 			}
 			break;
@@ -725,7 +749,7 @@ int main( int argc, char **argv )
 		return 1;
 	}
 	
-	ball.xv = -BALL_SPEED;
+	local_state.ball.xv = -BALL_SPEED;
 
 	loop();
 
