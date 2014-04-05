@@ -12,13 +12,13 @@
 
 #define dist_form( x, y ) ( sqrt( ( x * x ) + ( y * y ) ) )
 
+#pragma pack(push, 4)
 struct player
 {
 	SDL_Rect rect[2];
 	float offset;
 	int status[2];
 	int score;
-	SDL_mutex *mutex;
 };
 
 struct ball
@@ -27,8 +27,8 @@ struct ball
 	float xv, yv;
 	SDL_Rect rect;
 	int colliding;
-	SDL_mutex *mutex;
 };
+#pragma pack(pop)
 
 struct net
 {
@@ -38,13 +38,48 @@ struct net
 	int type;
 };
 
+#pragma pack(push, 4)
+struct cmd
+{
+	int type;
+	uint32_t time;
+	union
+	{
+		float offset; /* player movement */
+		int direction; /* serve direction */
+	} data;
+};
+#pragma pack(pop)
+
+struct cmd_buf
+{
+	struct cmd *cmds;
+	unsigned len;
+	unsigned maxlen;
+};
+
+#pragma pack(push, 4)
+struct cmd_net_buf
+{
+	uint32_t len;
+	struct cmd cmds[1];
+};
+#pragma pack(pop)
+
 int init();
 void quit();
 void input( SDL_Event );
 void loop();
 void white_rect( SDL_Rect * );
-void reset_ball();
-void handle_ball();
+void reset_ball( struct ball *pball );
+void handle_ball( struct ball *pball, struct player *p1p, struct player *p2p );
+struct cmd_buf *init_cmd_buf( unsigned size );
+void free_cmd_buf( struct cmd_buf *p );
+void player_move_cmd( struct cmd *out, int type, float offset );
+int add_to_cmd_buf( struct cmd_buf *buf, struct cmd cmd );
+void clear_cmd_buf( struct cmd_buf *p );
+struct cmd_net_buf *cmd_to_net( struct cmd_buf *in );
+void advance_gamestate( uint32_t start, uint32_t duration, uint32_t timestep, struct ball *pball, struct player *p1p, struct player *p2p, struct cmd_buf *buf );
 int net_bind( struct net * );
 int net_recv( struct net *pnet, void *outbuf, int buflen, int *outlen, IPaddress *ip );
 int net_send( struct net *pnet, void *inbuf, int inlen, IPaddress to );
@@ -85,9 +120,19 @@ enum
 	NET_STATE_GAME
 };
 
+enum
+{
+	CMD_PLAYER1_MOVE = 1,
+	CMD_PLAYER1_SERVE = 2,
+	CMD_PLAYER2_MOVE = 3,
+	CMD_PLAYER2_SERVE = 4
+};
+
 SDL_Window *window;
 SDL_Renderer *renderer;
 int running;
+uint32_t start_time;
+uint32_t current_time;
 Uint32 delta;
 struct net net;
 
@@ -114,16 +159,12 @@ int init()
 	ball.rect.w = BALL_SIZE;
 	ball.rect.h = BALL_SIZE;
 
-	reset_ball();
+	reset_ball( &ball );
 
 	player1.rect[1].x = WIN_WIDTH - player1.rect[1].w;
 	player2.rect[1].y = WIN_HEIGHT - player2.rect[1].h;
 
 	ball.colliding = 0;
-
-	player1.mutex = SDL_CreateMutex();
-	player2.mutex = SDL_CreateMutex();
-	ball.mutex = SDL_CreateMutex();
 
 	return ( ( window != NULL ) && ( renderer != NULL ) );
 }
@@ -192,7 +233,7 @@ void input( SDL_Event event )
 
 		if( event.key.keysym.sym == SDLK_r )
 		{
-			reset_ball();
+			reset_ball( &ball );
 			ball.xv = -BALL_SPEED;
 		}
 
@@ -202,8 +243,13 @@ void input( SDL_Event event )
 
 void loop()
 {
+	struct cmd_buf *cb;
+	struct cmd tc;
 	SDL_Event event;
 	Uint32 ticks = SDL_GetTicks();
+	start_time = ticks;
+
+	cb = init_cmd_buf( 512 );
 
 	while( running )
 	{
@@ -216,12 +262,14 @@ void loop()
 		{
 	  		if( player1.status[0] )
 			{
-				player1.offset -= PADDLE_SPEED * ( delta / 1000.f );
+				player_move_cmd( &tc, CMD_PLAYER1_MOVE, -PADDLE_SPEED * ( delta / 1000.f ) );
+				add_to_cmd_buf( cb, tc );
 			}
 			
 			if( player1.status[1] )
 			{
-				player1.offset += PADDLE_SPEED * ( delta / 1000.f );
+				player_move_cmd( &tc, CMD_PLAYER1_MOVE, PADDLE_SPEED * ( delta / 1000.f ) );
+				add_to_cmd_buf( cb, tc );
 			}
 		}
 
@@ -229,33 +277,20 @@ void loop()
 		{	
 			if( player2.status[1] )
 			{
-				player2.offset -= PADDLE_SPEED * ( delta / 1000.f );
+				player_move_cmd( &tc, CMD_PLAYER2_MOVE, -PADDLE_SPEED * ( delta / 1000.f ) );
+				add_to_cmd_buf( cb, tc );
 			}
 			
 			if( player2.status[0] )
 			{
-				player2.offset += PADDLE_SPEED * ( delta / 1000.f );
+				player_move_cmd( &tc, CMD_PLAYER2_MOVE, PADDLE_SPEED * ( delta / 1000.f ) );
+				add_to_cmd_buf( cb, tc );
 			}
 		}
 
-		player1.rect[0].y = player1.offset;
-		player2.rect[0].x = player2.offset;
-		player1.rect[1].y = player1.offset;
-		player2.rect[1].x = player2.offset;
+		advance_gamestate( current_time, delta, 10, &ball, &player1, &player2, cb );
 
-		if( net.type == NET_LOCAL || net.type == NET_HOST )
-		{
-			ball.x += ball.xv * ( delta / 1000.f );
-			ball.y += ball.yv * ( delta / 1000.f );
-		}
-
-		ball.rect.x = ball.x;
-		ball.rect.y = ball.y;
-
-		if( net.type == NET_LOCAL || net.type == NET_HOST )
-		{
-			handle_ball();
-		}
+		clear_cmd_buf( cb );
 
 		SDL_RenderClear( renderer );
 
@@ -269,6 +304,7 @@ void loop()
 		SDL_RenderPresent( renderer );
 
 		delta = SDL_GetTicks() - ticks;
+		current_time = SDL_GetTicks() - start_time;
 		ticks = SDL_GetTicks();
 	}
 }
@@ -283,69 +319,158 @@ void white_rect( SDL_Rect *rect )
 	SDL_SetRenderDrawColor( renderer, r, g, b, a );
 }
 
-void reset_ball()
+void reset_ball( struct ball *pball )
 {
-	ball.x = ( WIN_WIDTH / 2 ) - ( BALL_SIZE / 2 );
-	ball.y = ( WIN_HEIGHT / 2 ) - ( BALL_SIZE / 2 );
-	ball.xv = ball.yv = 0.0;
+	pball->x = ( WIN_WIDTH / 2 ) - ( BALL_SIZE / 2 );
+	pball->y = ( WIN_HEIGHT / 2 ) - ( BALL_SIZE / 2 );
+	pball->xv = pball->yv = 0.0;
 }
 
-void handle_ball()
+void handle_ball( struct ball *pball, struct player *p1p, struct player *p2p )
 {
 	SDL_Rect *p;
 	float dist;
-	if( ball.x + BALL_SIZE < 0 )
+	if( pball->x + BALL_SIZE < 0 )
 	{
-		player2.score ++;
-		reset_ball();
+		p2p->score ++;
+		reset_ball( pball );
 		return;
 	}
-	if( ball.x > WIN_WIDTH )
+	if( pball->x > WIN_WIDTH )
 	{
-		player2.score ++;
-		reset_ball();
+		p2p->score ++;
+		reset_ball( pball );
 		return;
 	}
 
-	if( ball.y + BALL_SIZE < 0 )
+	if( pball->y + BALL_SIZE < 0 )
 	{
-		player1.score ++;
-		reset_ball();
+		p1p->score ++;
+		reset_ball( pball );
 		return;
 	}
-	if( ball.y > WIN_HEIGHT )
+	if( pball->y > WIN_HEIGHT )
 	{
-		player1.score ++;
-		reset_ball();
+		p1p->score ++;
+		reset_ball( pball );
 		return;
 	}
 
     p = (SDL_Rect*)NULL;
 
-	if( SDL_HasIntersection( &ball.rect, &player1.rect[0] ) )
-		p = &player1.rect[0];
-	if( SDL_HasIntersection( &ball.rect, &player2.rect[0] ) )
-		p = &player2.rect[0];
-	if( SDL_HasIntersection( &ball.rect, &player1.rect[1] ) )
-		p = &player1.rect[1];
-	if( SDL_HasIntersection( &ball.rect, &player2.rect[1] ) )
-		p = &player2.rect[1];
+	if( SDL_HasIntersection( &pball->rect, &p1p->rect[0] ) )
+		p = &p1p->rect[0];
+	if( SDL_HasIntersection( &pball->rect, &p2p->rect[0] ) )
+		p = &p2p->rect[0];
+	if( SDL_HasIntersection( &pball->rect, &p1p->rect[1] ) )
+		p = &p1p->rect[1];
+	if( SDL_HasIntersection( &pball->rect, &p2p->rect[1] ) )
+		p = &p2p->rect[1];
 
-	if( p != NULL && ball.colliding == 0 )
+	if( p != NULL && pball->colliding == 0 )
 	{
-		ball.xv = ( ( ( ball.x + BALL_SIZE / 2.0 ) - (p->x + p->w / 2.0 ) )  );
-		ball.yv = ( ( ball.y + BALL_SIZE / 2.0 ) - (p->y + p->h / 2.0 ) );
-		dist = dist_form( ball.xv, ball.yv );
-		ball.xv /= dist;
-		ball.yv /= dist;
-		ball.xv *= BALL_SPEED;
-		ball.yv *= BALL_SPEED;
-		ball.colliding = 1;
+		pball->xv = ( ( ( pball->x + BALL_SIZE / 2.0 ) - (p->x + p->w / 2.0 ) )  );
+		pball->yv = ( ( pball->y + BALL_SIZE / 2.0 ) - (p->y + p->h / 2.0 ) );
+		dist = dist_form( pball->xv, pball->yv );
+		pball->xv /= dist;
+		pball->yv /= dist;
+		pball->xv *= BALL_SPEED;
+		pball->yv *= BALL_SPEED;
+		pball->colliding = 1;
 	}
 
 	if ( p == NULL )
 	{
-		ball.colliding = 0;
+		pball->colliding = 0;
+	}
+}
+
+struct cmd_buf *init_cmd_buf( unsigned size )
+{
+	struct cmd_buf *r = (struct cmd_buf*)malloc( sizeof(struct cmd_buf) );
+	r->cmds = (struct cmd*)malloc( sizeof(struct cmd) * size );
+	r->maxlen = size;
+	r->len = 0;
+}
+
+void free_cmd_buf( struct cmd_buf *p )
+{
+	free( p->cmds );
+	free( p );
+}
+
+void clear_cmd_buf( struct cmd_buf *p )
+{
+	memset( p->cmds, 0, sizeof(struct cmd) * p->len );
+	p->len = 0;
+}
+
+void player_move_cmd( struct cmd *out, int type, float offset )
+{
+	out->data.offset = offset;
+	out->type = type;
+	out->time = SDL_GetTicks() - start_time;
+}
+
+int add_to_cmd_buf( struct cmd_buf *buf, struct cmd cmd )
+{
+	if( buf->len == buf->maxlen )
+		return 0;
+
+	buf->len += 1;
+	buf->cmds[ buf->len-1 ] = cmd;
+	return 1;
+}
+
+struct cmd_net_buf *cmd_to_net( struct cmd_buf *in )
+{
+	uint8_t *p;
+	struct cmd_net_buf *r = (struct cmd_net_buf*)malloc( sizeof( uint32_t ) + ( in->len * sizeof( struct cmd ) ) );
+	r->len = in->len;
+	p = (uint8_t*) (((uint32_t*)r)+1);
+	memcpy( p, in->cmds, in->len * sizeof(struct cmd) );
+	return r;
+}
+
+void advance_gamestate( uint32_t start, uint32_t duration, uint32_t timestep, struct ball *pball, struct player *p1p, struct player *p2p, struct cmd_buf *buf )
+{
+	uint32_t i;
+	unsigned ci;
+
+	for( i = 0; i < duration; i++ )
+	{
+		for( ci = 0; ci < buf->len; ci++ )
+		{
+			if( ( i + start ) == buf->cmds[ci].time )
+			{
+				switch( buf->cmds[ci].type )
+				{
+				case CMD_PLAYER1_MOVE:
+					p1p->offset += buf->cmds[ci].data.offset;
+					break;
+
+				case CMD_PLAYER2_MOVE:
+					p2p->offset += buf->cmds[ci].data.offset;
+					break;
+				}
+			}
+		}
+
+		p1p->rect[0].y = p1p->offset;
+		p2p->rect[0].x = p2p->offset;
+		p1p->rect[1].y = p1p->offset;
+		p2p->rect[1].x = p2p->offset;
+
+		if( ( i + start ) % timestep == 0 )
+		{
+			pball->x += pball->xv * ( timestep / 1000.f );
+			pball->y += pball->yv * ( timestep / 1000.f );
+
+			pball->rect.x = pball->x;
+			pball->rect.y = pball->y;
+
+			handle_ball( pball, p1p, p2p );
+		}
 	}
 }
 
